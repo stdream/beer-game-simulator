@@ -1,0 +1,226 @@
+import React, { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
+import io, { Socket } from 'socket.io-client';
+import { GameState, GameConfig, Role, GameResults } from '../types/game.types';
+
+interface GameContextType {
+  socket: Socket | null;
+  gameState: GameState | null;
+  currentPlayerId: string | null;
+  currentPlayerRole: Role | null;
+  isAdmin: boolean;
+  gameResults: GameResults | null;
+  connectionStatus: 'connecting' | 'connected' | 'disconnected';
+  
+  createGame: (config: GameConfig) => void;
+  joinGame: (playerName: string, role: Role) => void;
+  startGame: () => void;
+  placeOrder: (quantity: number) => void;
+  processRound: () => void;
+  resetGame: () => void;
+}
+
+const GameContext = createContext<GameContextType | undefined>(undefined);
+
+export const SocketGameProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [gameState, setGameState] = useState<GameState | null>(null);
+  const [currentPlayerId, setCurrentPlayerId] = useState<string | null>(null);
+  const [currentPlayerRole, setCurrentPlayerRole] = useState<Role | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [gameResults, setGameResults] = useState<GameResults | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('connecting');
+  const [currentGameId, setCurrentGameId] = useState<string | null>(null);
+
+  // Initialize socket connection
+  useEffect(() => {
+    const newSocket = io('http://localhost:3001', {
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+    });
+
+    newSocket.on('connect', () => {
+      console.log('Connected to server');
+      setConnectionStatus('connected');
+      
+      // Rejoin game if we have a gameId
+      const savedGameId = sessionStorage.getItem('currentGameId');
+      if (savedGameId) {
+        newSocket.emit('get-game-state', { gameId: savedGameId }, (response: any) => {
+          if (response.success) {
+            setGameState(response.gameState);
+            setCurrentGameId(savedGameId);
+          }
+        });
+      }
+    });
+
+    newSocket.on('disconnect', () => {
+      console.log('Disconnected from server');
+      setConnectionStatus('disconnected');
+    });
+
+    newSocket.on('game-updated', (updatedState: GameState) => {
+      console.log('Game updated:', updatedState);
+      setGameState(updatedState);
+    });
+
+    newSocket.on('game-started', (updatedState: GameState) => {
+      console.log('Game started:', updatedState);
+      setGameState(updatedState);
+    });
+
+    newSocket.on('all-players-ordered', () => {
+      console.log('All players have placed their orders');
+    });
+
+    newSocket.on('round-processed', (updatedState: GameState) => {
+      console.log('Round processed:', updatedState);
+      setGameState(updatedState);
+    });
+
+    newSocket.on('game-ended', (results: GameResults) => {
+      console.log('Game ended:', results);
+      setGameResults(results);
+    });
+
+    setSocket(newSocket);
+
+    return () => {
+      newSocket.disconnect();
+    };
+  }, []);
+
+  const createGame = useCallback((config: GameConfig) => {
+    if (!socket) return;
+
+    socket.emit('create-game', config, (response: any) => {
+      if (response.success) {
+        console.log('Game created:', response);
+        setCurrentGameId(response.gameId);
+        setGameState(response.gameState);
+        setCurrentPlayerId(response.adminId);
+        setIsAdmin(true);
+        setCurrentPlayerRole(null);
+        setGameResults(null);
+        sessionStorage.setItem('currentGameId', response.gameId);
+        sessionStorage.setItem('isAdmin', 'true');
+      }
+    });
+  }, [socket]);
+
+  const joinGame = useCallback((playerName: string, role: Role) => {
+    if (!socket || !currentGameId) return;
+
+    const playerId = currentPlayerId || `player-${Date.now()}`;
+    
+    socket.emit('join-game', {
+      gameId: currentGameId,
+      playerId,
+      playerName,
+      role
+    }, (response: any) => {
+      if (response.success) {
+        console.log('Joined game:', response);
+        setGameState(response.gameState);
+        setCurrentPlayerId(playerId);
+        setCurrentPlayerRole(role);
+        sessionStorage.setItem('currentPlayerId', playerId);
+        sessionStorage.setItem('currentPlayerRole', role);
+      }
+    });
+  }, [socket, currentGameId, currentPlayerId]);
+
+  const startGame = useCallback(() => {
+    if (!socket || !currentGameId || !isAdmin) return;
+
+    socket.emit('start-game', { gameId: currentGameId }, (response: any) => {
+      if (response.success) {
+        console.log('Game started successfully');
+      } else {
+        console.error('Failed to start game:', response.error);
+        alert(response.error || 'Failed to start game');
+      }
+    });
+  }, [socket, currentGameId, isAdmin]);
+
+  const placeOrder = useCallback((quantity: number) => {
+    if (!socket || !currentGameId || !currentPlayerId) return;
+
+    socket.emit('place-order', {
+      gameId: currentGameId,
+      playerId: currentPlayerId,
+      quantity
+    }, (response: any) => {
+      if (!response.success) {
+        console.error('Failed to place order:', response.error);
+      }
+    });
+  }, [socket, currentGameId, currentPlayerId]);
+
+  const processRound = useCallback(() => {
+    if (!socket || !currentGameId || !isAdmin) return;
+
+    socket.emit('process-round', { gameId: currentGameId }, (response: any) => {
+      if (!response.success) {
+        console.error('Failed to process round:', response.error);
+      }
+    });
+  }, [socket, currentGameId, isAdmin]);
+
+  const resetGame = useCallback(() => {
+    sessionStorage.clear();
+    setGameState(null);
+    setCurrentPlayerId(null);
+    setCurrentPlayerRole(null);
+    setIsAdmin(false);
+    setGameResults(null);
+    setCurrentGameId(null);
+  }, []);
+
+  // Load saved session on mount
+  useEffect(() => {
+    const savedGameId = sessionStorage.getItem('currentGameId');
+    const savedPlayerId = sessionStorage.getItem('currentPlayerId');
+    const savedRole = sessionStorage.getItem('currentPlayerRole');
+    const savedIsAdmin = sessionStorage.getItem('isAdmin') === 'true';
+
+    if (savedGameId) {
+      setCurrentGameId(savedGameId);
+      setCurrentPlayerId(savedPlayerId);
+      setCurrentPlayerRole(savedRole as Role);
+      setIsAdmin(savedIsAdmin);
+    }
+  }, []);
+
+  return (
+    <GameContext.Provider
+      value={{
+        socket,
+        gameState,
+        currentPlayerId,
+        currentPlayerRole,
+        isAdmin,
+        gameResults,
+        connectionStatus,
+        createGame,
+        joinGame,
+        startGame,
+        placeOrder,
+        processRound,
+        resetGame
+      }}
+    >
+      {children}
+    </GameContext.Provider>
+  );
+};
+
+export const useSocketGame = () => {
+  const context = useContext(GameContext);
+  if (context === undefined) {
+    throw new Error('useSocketGame must be used within a SocketGameProvider');
+  }
+  return context;
+};
